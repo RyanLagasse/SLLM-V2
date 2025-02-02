@@ -18,8 +18,8 @@ def run_experiments():
         "tiiuae/Falcon3-7B-Instruct",
         "tiiuae/Falcon3-10B-Instruct",
     ]
-    TRAIN_SUBSET_SIZES = [0, 100, 250, 500, 750, 1000]  # Number of training examples (0 = zero-shot)
-    TARGET_TOTAL_TOKENS_LIST = [5000, 10000, 20000]      # Overall token budgets
+    TRAIN_SUBSET_SIZES = [0, 50, 75, 100, 125]  # Number of training examples (0 = zero-shot)
+    TARGET_TOTAL_TOKENS_LIST = [1000, 2000, 3000]      # Overall token budgets
     RANDOM_SEEDS = [42, 100, 2025]
     
     # MMLU dataset details.
