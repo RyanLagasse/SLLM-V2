@@ -7,3 +7,5 @@ HuggingFaceTB/SmolLM-135M-Instruct,FMT,many_short,179,20250,42,78.01117318435755
 HuggingFaceTB/SmolLM-135M-Instruct,FMT,many_short,256,20250,42,79.0859375,20246,MMLU:moral_scenarios,accuracy:0.246,0
 HuggingFaceTB/SmolLM-135M-Instruct,FMT,many_short,256,20250,42,79.0859375,20246,MMLU:moral_scenarios,accuracy:0.246,0
 HuggingFaceTB/SmolLM-135M-Instruct,FMT,many_short,256,20250,42,79.0859375,20246,MMLU:moral_scenarios,accuracy:0.246,0
+HuggingFaceTB/SmolLM-135M-Instruct,FMT,balanced,179,20250,42,84.8268156424581,15184,MMLU:moral_scenarios,accuracy:0.268,0
+HuggingFaceTB/SmolLM-135M-Instruct,FMT,balanced,239,20250,42,84.65271966527196,20232,MMLU:moral_scenarios,accuracy:0.279,0
