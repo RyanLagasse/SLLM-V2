@@ -4,146 +4,244 @@ import csv
 import time
 import random
 import numpy as np
+import torch
 from transformers import AutoTokenizer, TrainingArguments
-from data_utils import load_mmlu_dataset, tokenize_training_example, create_subsample_groups, set_seed
+from data_utils import (
+    set_seed,
+    load_mmlu_dataset,
+    tokenize_training_example,
+    create_subsample_groups,
+    compute_dataset_metrics,
+)
 from train import fine_tune_model
 
 # -----------------------------
-# Configuration Parameters
+# Dataset Selection and Tokenization Functions for BRIMI
 # -----------------------------
-# MMLU configuration name (change this one value to pick a different subset)
-MMLU_CONFIG = "human_aging"  # e.g., "human_aging", "college_biology", etc.
+def load_brimi_dataset(folder="/opt/extra/avijit/projects/rlof/datasets/bricc_no_instructions", name="bricc_gender_20"):
+    """
+    Loads the BRIMI dataset from JSON files.
+    Returns (train_dataset, eval_dataset).
+    """
+    from datasets import load_dataset
+    train_dataset = load_dataset("json", data_files=f"{folder}/{name}_train.json", split="train")
+    eval_dataset = load_dataset("json", data_files=f"{folder}/{name}_eval.json", split="train")
+    return train_dataset, eval_dataset
 
-# Model to use
+def tokenize_training_example_brimi(example, tokenizer):
+    """
+    Transforms a BRIMI example into a prompt for fine-tuning.
+    The prompt is formed from the 'text' field.
+    Returns a tokenized output with keys: 'input_ids', 'attention_mask', 'token_length', and 'labels'.
+    """
+    try:
+        # Reformat the text if needed.
+        text = f"Text: {example['text'].strip()}"
+        # For training, we include the classification in the prompt if desired.
+        # Here, we simply use the text; the model is expected to learn the mapping implicitly.
+        prompt = text  # Alternatively, you could append "\nClassification:" if that suits your training.
+        tokenized = tokenizer(prompt, truncation=True, max_length=512)
+        tokenized["token_length"] = len(tokenized["input_ids"])
+        tokenized["labels"] = tokenized["input_ids"].copy()
+        return tokenized
+    except Exception as e:
+        print(f"Error tokenizing BRIMI example: {e}. Returning empty tokenization.")
+        return {"input_ids": [], "attention_mask": [], "token_length": 0, "labels": []}
+
+# -----------------------------
+# Evaluation Functions (for MMLU and BRIMI)
+# -----------------------------
+def compute_accuracy(model, eval_dataset, tokenizer):
+    """
+    For MMLU-style evaluation: uses 'question', 'choices', 'answer' fields.
+    Returns a dictionary with key 'accuracy'.
+    """
+    model.eval()
+    predictions = []
+    ground_truths = []
+    for example in eval_dataset:
+        if "question" not in example:
+            continue
+        question = example["question"]
+        choices = example["choices"]
+        correct_answer = example["answer"]
+        best_choice = None
+        best_score = float("inf")
+        for i, choice in enumerate(choices):
+            prompt = f"Question: {question} Answer: {choice}"
+            inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=512)
+            inputs = {k: v.to(model.device) for k, v in inputs.items()}
+            with torch.no_grad():
+                outputs = model(**inputs, labels=inputs["input_ids"])
+                loss = outputs.loss.item()
+            if loss < best_score:
+                best_score = loss
+                best_choice = i
+        predictions.append(best_choice)
+        ground_truths.append(correct_answer)
+    if len(ground_truths) == 0:
+        return {"accuracy": 0.0}
+    from sklearn.metrics import accuracy_score
+    acc = accuracy_score(ground_truths, predictions)
+    return {"accuracy": acc}
+
+def compute_brimi_metrics(model, eval_dataset, tokenizer):
+    """
+    For BRIMI-style evaluation: assumes each example has 'text' and 'classification'.
+    Constructs prompts of the form:
+      "Does this text exhibit gender bias? {text} Answer: {candidate}"
+    with candidates ["False", "True"]. Maps ground truth to 0 if "false", else 1.
+    Returns a dictionary with keys: accuracy, precision, recall, f1, f2, auc.
+    """
+    model.eval()
+    gt_labels = []
+    pred_labels = []
+    pred_probs = []  # probability for positive class
+    for example in eval_dataset:
+        if "text" not in example:
+            continue
+        text = example["text"]
+        candidates = ["False", "True"]
+        gt_str = example["classification"].strip().lower()
+        gt = 0 if gt_str == "false" else 1
+        gt_labels.append(gt)
+        losses = []
+        scores = []
+        for i, candidate in enumerate(candidates):
+            prompt = f"Does this text exhibit gender bias? {text} Answer: {candidate}"
+            inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=512)
+            inputs = {k: v.to(model.device) for k, v in inputs.items()}
+            with torch.no_grad():
+                outputs = model(**inputs, labels=inputs["input_ids"])
+                loss = outputs.loss.item()
+            losses.append(loss)
+            scores.append(-loss)  # lower loss -> higher score
+        scores_np = np.array(scores)
+        exp_scores = np.exp(scores_np - np.max(scores_np))
+        probs = exp_scores / np.sum(exp_scores)
+        pred = int(np.argmax(probs))
+        pred_labels.append(pred)
+        pred_probs.append(probs[1])
+    # Compute metrics using scikit-learn.
+    from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, fbeta_score, roc_auc_score
+    if len(gt_labels) == 0:
+        return {"accuracy": 0.0, "precision": 0.0, "recall": 0.0, "f1": 0.0, "f2": 0.0, "auc": float('nan')}
+    acc = accuracy_score(gt_labels, pred_labels)
+    prec = precision_score(gt_labels, pred_labels, zero_division=0)
+    rec = recall_score(gt_labels, pred_labels, zero_division=0)
+    f1 = f1_score(gt_labels, pred_labels, zero_division=0)
+    f2 = fbeta_score(gt_labels, pred_labels, beta=2, zero_division=0)
+    try:
+        auc = roc_auc_score(gt_labels, pred_probs)
+    except Exception:
+        auc = float('nan')
+    return {"accuracy": acc, "precision": prec, "recall": rec, "f1": f1, "f2": f2, "auc": auc}
+
+# -----------------------------
+# Configuration for Experiments
+# -----------------------------
+# Set DATASET_TYPE: "MMLU" or "BRIMI"
+DATASET_TYPE = "MMLU"  # Change to "MMLU" to run on an MMLU subset.
+MMLU_CONFIG = "moral_scenarios"  # used if DATASET_TYPE == "MMLU"
+
+# Model list (you can add or remove models)
 MODEL_LIST = [
-    # "HuggingFaceTB/SmolLM-135M-Instruct",
-    # "HuggingFaceTB/SmolLM-360M-Instruct",
-    # "Qwen/Qwen2.5-0.5B-Instruct",
-    # "tiiuae/Falcon3-1B-Instruct",
+    "HuggingFaceTB/SmolLM-135M-Instruct",
+    "HuggingFaceTB/SmolLM-360M-Instruct",
+    "Qwen/Qwen2.5-0.5B-Instruct",
+    "tiiuae/Falcon3-1B-Instruct",
     "tiiuae/Falcon3-3B-Instruct",
     "tiiuae/Falcon3-7B-Instruct",
     "tiiuae/Falcon3-10B-Instruct",
 ]
-
-# Use the first model for orchestration (you can later loop over models)
 TEST_MODEL_NAME = MODEL_LIST[0]
 
-# Random seeds to ensure reproducibility
 RANDOM_SEEDS = [42]
 
-# Target fractions for total token budget.
-# For each dataset, we'll compute total tokens and then set target_tokens = fraction * (total tokens)
 TARGET_TOKEN_FRACTIONS = [0.33, 0.66, 1.0]
-
-# Subset sizes as fractions of the total number of training examples.
-# We want to compare performance when using 25%, 50%, 75%, and 100% of the training examples.
 SUBSET_FRACTIONS = [0.25, 0.50, 0.75, 1.0]
-
-# Subsampling strategies to test.
 SUBSAMPLING_STRATEGIES = ["few_long", "many_short", "balanced"]
 
-# Output CSV file for logging results.
 CSV_FILE = "experiment_results.csv"
-
-# -----------------------------
-# Helper Function: Compute total tokens and number of examples
-# -----------------------------
-def compute_dataset_metrics(tokenized_dataset):
-    """
-    Given a tokenized dataset (which can be a Hugging Face Dataset or a list),
-    compute the total number of tokens (by summing 'token_length') and
-    the total number of examples.
-    """
-    # If the dataset is a Hugging Face Dataset, convert the token_length column to a numpy array.
-    if hasattr(tokenized_dataset, "column"):
-        lengths = np.array(tokenized_dataset.column("token_length"))
-        total_tokens = int(np.sum(lengths))
-        num_examples = len(tokenized_dataset)
-    else:
-        # Otherwise, assume it's a list.
-        lengths = [ex["token_length"] for ex in tokenized_dataset]
-        total_tokens = int(sum(lengths))
-        num_examples = len(tokenized_dataset)
-    return total_tokens, num_examples
 
 # -----------------------------
 # Main Experimental Loop
 # -----------------------------
 def run_experiments():
-    # Load the raw MMLU dataset using the specified configuration.
-    raw_train, eval_dataset = load_mmlu_dataset(MMLU_CONFIG)
-    print(f"Loaded MMLU subset '{MMLU_CONFIG}': {len(raw_train)} training examples, {len(eval_dataset)} evaluation examples.")
-    
-    # Initialize tokenizer from the test model.
+    # Load dataset based on DATASET_TYPE.
+    if DATASET_TYPE == "MMLU":
+        raw_train, eval_dataset = load_mmlu_dataset(MMLU_CONFIG)
+        eval_dataset_name = f"MMLU:{MMLU_CONFIG}"
+        tokenize_fn = tokenize_training_example
+    elif DATASET_TYPE == "BRIMI":
+        from datasets import load_dataset  # In case not imported in data_utils
+        # Use the provided loader for BRIMI.
+        def load_brimi_dataset(folder="/opt/extra/avijit/projects/rlof/datasets/bricc_no_instructions", name="bricc_gender_20"):
+            train_dataset = load_dataset("json", data_files=f"{folder}/{name}_train.json", split="train")
+            eval_dataset = load_dataset("json", data_files=f"{folder}/{name}_eval.json", split="train")
+            return train_dataset, eval_dataset
+        raw_train, eval_dataset = load_brimi_dataset()
+        eval_dataset_name = "BRIMI"
+        tokenize_fn = tokenize_training_example_brimi
+    else:
+        raise ValueError("Unknown DATASET_TYPE. Choose 'MMLU' or 'BRIMI'.")
+
+    print(f"Loaded {DATASET_TYPE} dataset: {len(raw_train)} training examples, {len(eval_dataset)} evaluation examples.")
+
+    # Initialize tokenizer.
     tokenizer = AutoTokenizer.from_pretrained(TEST_MODEL_NAME)
-    
-    # Tokenize the training dataset.
-    # We remove all original columns so that the tokenized version has only the fields produced by tokenize_training_example.
+
+    # Tokenize training data.
     tokenized_train = raw_train.map(
-        lambda ex: tokenize_training_example(ex, tokenizer),
+        lambda ex: tokenize_fn(ex, tokenizer),
         remove_columns=raw_train.column_names,
         batched=False
     )
-    
-    # Optionally, filter out any examples that did not tokenize properly (missing 'labels').
     tokenized_train = tokenized_train.filter(lambda ex: "labels" in ex and len(ex["labels"]) > 0)
-    
-    # Compute overall metrics for the tokenized training dataset.
+
     total_tokens_available, total_examples = compute_dataset_metrics(tokenized_train)
     print(f"Total tokens in training data: {total_tokens_available}, Total examples: {total_examples}")
-    
-    # Determine target tokens based on fractions of the total available.
+
     target_tokens_list = [int(frac * total_tokens_available) for frac in TARGET_TOKEN_FRACTIONS]
-    # Determine subset sizes (number of examples) based on fractions of the total examples.
     subset_sizes = sorted(list(set([max(1, int(frac * total_examples)) for frac in SUBSET_FRACTIONS])))
-    
-    print(f"Target tokens (by fraction): {target_tokens_list}")
+
+    print(f"Target tokens (absolute): {target_tokens_list}")
     print(f"Subset sizes (number of examples): {subset_sizes}")
-    
-    # Open CSV file for logging.
+
+    # Open CSV for logging.
     with open(CSV_FILE, mode="w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow([
             "model_name", "tuning_method", "subset_strategy", "subset_size",
             "target_tokens", "random_seed", "avg_token_length", "total_tokens",
-            "evaluation_dataset", "accuracy", "training_time"
+            "evaluation_dataset", "metrics", "training_time"
         ])
-        
-        # Iterate over models (if you have more than one).
+
         for model_name in MODEL_LIST:
-            # Loop over random seeds.
             for seed in RANDOM_SEEDS:
                 set_seed(seed)
-                # For each target token budget (as an absolute number).
                 for target_tokens in target_tokens_list:
-                    # For each subsampling strategy.
                     for subset_strategy in SUBSAMPLING_STRATEGIES:
-                        # Use our custom subsampling function to select a subset from the tokenized training data.
                         subsample = create_subsample_groups(tokenized_train, target_tokens, strategy=subset_strategy, seed=seed)
-                        # For each subset size (number of examples) we want to test.
                         for subset_size in subset_sizes:
-                            # If subset_size is larger than the available subsample, use the full subsample.
                             if subset_size > len(subsample):
                                 current_subset = subsample
                             else:
                                 current_subset = subsample[:subset_size]
-                            # Compute average token length and total tokens in the current subset.
                             if len(current_subset) > 0:
                                 avg_token_length = np.mean([ex["token_length"] for ex in current_subset])
                                 total_tokens_used = int(sum(ex["token_length"] for ex in current_subset))
                             else:
                                 avg_token_length = 0
                                 total_tokens_used = 0
-                            
-                            # Set up output directory for this experiment.
+
                             output_dir = f"./results/{model_name}_{subset_strategy}_{subset_size}_{target_tokens}_seed{seed}"
                             os.makedirs(output_dir, exist_ok=True)
-                            
-                            # Create TrainingArguments.
-                            # Note: We disable internal evaluation (evaluation_strategy="no") because our eval_dataset is raw.
+
+                            # Use TrainingArguments with evaluation disabled.
                             training_args = TrainingArguments(
                                 output_dir=output_dir,
-                                num_train_epochs=1,  # For quick experiments; adjust as needed.
+                                num_train_epochs=1,
                                 per_device_train_batch_size=8,
                                 per_device_eval_batch_size=8,
                                 evaluation_strategy="no",
@@ -151,18 +249,23 @@ def run_experiments():
                                 logging_steps=50,
                                 fp16=True,
                             )
-                            
-                            print(f"Running experiment: model={model_name}, seed={seed}, "
-                                  f"target_tokens={target_tokens}, strategy={subset_strategy}, "
-                                  f"subset_size={len(current_subset)} (avg tokens {avg_token_length:.1f}, total {total_tokens_used})")
-                            
-                            # Run fine-tuning (or zero-shot if subset_size==0).
-                            # Here, if current_subset is empty, we treat it as zero-shot.
+
+                            print(f"Running: model={model_name}, seed={seed}, target_tokens={target_tokens}, "
+                                  f"strategy={subset_strategy}, subset_size={len(current_subset)} "
+                                  f"(avg tokens {avg_token_length:.1f}, total {total_tokens_used})")
+
                             tuning_method = "0-shot" if len(current_subset) == 0 else "FMT"
-                            acc = fine_tune_model(model_name, current_subset if len(current_subset) > 0 else None, eval_dataset, output_dir, training_args)
-                            training_time = 0  # Replace with actual timing if desired.
+                            # For BRIMI, use eval_fn="brimi" so that the fine_tune_model function computes full metrics.
+                            if DATASET_TYPE == "BRIMI":
+                                metrics = fine_tune_model(model_name, current_subset if len(current_subset) > 0 else None,
+                                                          eval_dataset, output_dir, training_args, eval_fn="brimi")
+                            else:
+                                metrics = fine_tune_model(model_name, current_subset if len(current_subset) > 0 else None,
+                                                          eval_dataset, output_dir, training_args, eval_fn="mmlu")
                             
-                            # Log results.
+                            # Convert metrics dict to a string for logging.
+                            metrics_str = ";".join([f"{k}:{v:.3f}" for k, v in metrics.items()])
+                            training_time = 0  # Replace with actual timing if desired.
                             writer.writerow([
                                 model_name,
                                 tuning_method,
@@ -172,12 +275,12 @@ def run_experiments():
                                 seed,
                                 avg_token_length,
                                 total_tokens_used,
-                                f"MMLU:{MMLU_CONFIG}",
-                                acc,
+                                eval_dataset_name,
+                                metrics_str,
                                 training_time,
                             ])
                             f.flush()
-    
+
     print(f"Experiments completed. Results saved to {CSV_FILE}")
 
 if __name__ == "__main__":

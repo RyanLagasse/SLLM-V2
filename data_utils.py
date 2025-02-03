@@ -6,6 +6,36 @@ from datasets import load_dataset, Dataset
 def set_seed(seed):
     random.seed(seed)
     np.random.seed(seed)
+
+def compute_dataset_metrics(tokenized_dataset):
+    """
+    Given a tokenized dataset (either a Hugging Face Dataset or a plain list of dictionaries),
+    compute the following metrics:
+      - total_tokens: The sum of the 'token_length' field across all examples.
+      - num_examples: The total number of examples in the dataset.
+    
+    Returns:
+      A tuple (total_tokens, num_examples).
+      
+    This function is essential for setting experimental parameters (e.g., determining target token budgets)
+    in an apples-to-apples manner across datasets of different sizes.
+    """
+    # If tokenized_dataset is a Hugging Face Dataset, use its built-in methods.
+    if hasattr(tokenized_dataset, "column"):
+        try:
+            lengths = tokenized_dataset.column("token_length")
+        except Exception:
+            # Fallback: use a list comprehension.
+            lengths = [ex["token_length"] for ex in tokenized_dataset]
+        total_tokens = int(np.sum(np.array(lengths)))
+        num_examples = len(tokenized_dataset)
+    else:
+        # Otherwise, assume tokenized_dataset is a plain list.
+        lengths = [ex["token_length"] for ex in tokenized_dataset]
+        total_tokens = int(sum(lengths))
+        num_examples = len(tokenized_dataset)
+    return total_tokens, num_examples
+
     
 def load_mmlu_dataset(config="anatomy"):
     """
