@@ -142,8 +142,8 @@ def compute_brimi_metrics(model, eval_dataset, tokenizer):
 # -----------------------------
 # Set DATASET_TYPE: "MMLU" or "BRIMI"
 DATASET_TYPE = "MMLU"  # Change to "MMLU" to run on an MMLU subset.
-# MMLU_CONFIG = "moral_scenarios"  # used if DATASET_TYPE == "MMLU"
-MMLU_CONFIG = "professional_law"  # used if DATASET_TYPE == "MMLU"
+MMLU_CONFIG = "moral_scenarios"  # used if DATASET_TYPE == "MMLU"
+# MMLU_CONFIG = "professional_law"  # used if DATASET_TYPE == "MMLU"
 
 
 # Model list (you can add or remove models)
@@ -164,7 +164,7 @@ TARGET_TOKEN_FRACTIONS = [0.2, 0.4, 0.6, 0.8, 1.0]
 SUBSET_FRACTIONS = [0.2, 0.4, 0.6, 0.8, 1.0]
 SUBSAMPLING_STRATEGIES = ["few_long", "many_short", "balanced"]
 
-CSV_FILE = "experiment_results.csv"
+CSV_FILE = "experiment_results_moral.csv"
 
 # -----------------------------
 # Main Experimental Loop
